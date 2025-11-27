@@ -628,8 +628,7 @@ body, #canvas-container {
       COIN_INTERVAL: 2500, // ms
       QUADRANT_INTERVAL: 30000, // ms
       // Audio detection settings
-      AUDIO_THRESHOLD: 0.15, // Minimum audio level to count as brushing
-      AUDIO_HIGH_FREQ_RATIO: 0.4, // Ratio of high-frequency energy (brushing is high-freq noise)
+      AUDIO_THRESHOLD: 0.08, // Minimum audio level to count as brushing (lowered for sensitivity)
       // Power-up settings
       POWERUP_CHANCE: 0.15, // Chance of power-up appearing
       POWERUP_DURATION: 5000, // ms
@@ -1114,33 +1113,25 @@ body, #canvas-container {
 
       audioAnalyser.getByteFrequencyData(audioDataArray);
 
-      // Calculate total energy
+      // Calculate average volume across all frequencies
       let totalEnergy = 0;
-      let highFreqEnergy = 0;
-      const midPoint = Math.floor(audioDataArray.length / 2);
-
       for (let i = 0; i < audioDataArray.length; i++) {
         totalEnergy += audioDataArray[i];
-        if (i > midPoint) {
-          highFreqEnergy += audioDataArray[i];
-        }
       }
-
       const avgEnergy = totalEnergy / audioDataArray.length / 255;
-      const highFreqRatio = totalEnergy > 0 ? (highFreqEnergy / (totalEnergy - highFreqEnergy + 1)) : 0;
 
-      // Brushing sounds are characterized by:
-      // 1. Moderate to high overall volume
-      // 2. High frequency content (the scrubbing sound)
-      const isBrushing = avgEnergy > CONFIG.AUDIO_THRESHOLD && highFreqRatio > CONFIG.AUDIO_HIGH_FREQ_RATIO;
+      // Simple volume-based detection - brushing creates sustained sound
+      const isBrushing = avgEnergy > CONFIG.AUDIO_THRESHOLD;
 
       if (isBrushing) {
         audioStreak++;
       } else {
-        audioStreak = Math.max(0, audioStreak - 1);
+        // Decay slowly so brief pauses don't reset
+        audioStreak = Math.max(0, audioStreak - 0.5);
       }
 
-      return audioStreak > 3; // Need sustained audio to count
+      // Need just a couple frames of sustained audio
+      return audioStreak > 2;
     }
 
     // ============ CAMERA & MOTION DETECTION ============
