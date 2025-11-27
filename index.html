@@ -498,6 +498,56 @@ body {
 #motion-canvas {
   display: none;
 }
+
+/* Audio indicator */
+#audio-indicator {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  transition: all 0.3s ease;
+}
+
+#audio-indicator.active {
+  background: var(--success-green);
+  box-shadow: 0 0 10px var(--success-green);
+}
+
+#audio-indicator.inactive {
+  background: rgba(100,100,100,0.7);
+}
+
+/* Power-up indicator */
+#powerup-indicator {
+  position: fixed;
+  bottom: 170px;
+  right: 20px;
+  font-size: 40px;
+  animation: powerupPulse 0.5s ease-in-out infinite;
+  display: none;
+  z-index: 25;
+}
+
+#powerup-indicator.show {
+  display: block;
+}
+
+@keyframes powerupPulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.2); }
+}
+
+/* Theme transition */
+body, #canvas-container {
+  transition: background-color 0.5s ease;
+}
 ```
 
   </style>
@@ -538,15 +588,18 @@ body {
 
   <div id="camera-container">
     <video id="video-feed" autoplay playsinline muted></video>
+    <div id="audio-indicator" class="inactive">🎤</div>
     <div id="brush-status" class="not-brushing">Keep brushing!</div>
   </div>
+
+  <div id="powerup-indicator"></div>
 
   <div id="start-screen">
     <div id="start-tooth">🦷</div>
     <h1 id="start-title">TOOTHBRUSH HERO!</h1>
     <p id="start-subtitle">Brush for 2 minutes and collect coins! 🪙✨</p>
     <button id="start-button" class="ui-element">START BRUSHING! 🚀</button>
-    <p id="camera-prompt">📸 We'll use your camera to see you brush!</p>
+    <p id="camera-prompt">📸🎤 We'll use your camera AND microphone to detect real brushing!</p>
   </div>
 
   <div id="countdown-overlay">
@@ -574,15 +627,21 @@ body {
       MOTION_PIXEL_RATIO: 0.015,
       COIN_INTERVAL: 2500, // ms
       QUADRANT_INTERVAL: 30000, // ms
+      // Audio detection settings
+      AUDIO_THRESHOLD: 0.15, // Minimum audio level to count as brushing
+      AUDIO_HIGH_FREQ_RATIO: 0.4, // Ratio of high-frequency energy (brushing is high-freq noise)
+      // Power-up settings
+      POWERUP_CHANCE: 0.15, // Chance of power-up appearing
+      POWERUP_DURATION: 5000, // ms
     };
-    
+
     const QUADRANTS = [
       { text: 'TOP LEFT', icon: '↖️' },
       { text: 'TOP RIGHT', icon: '↗️' },
       { text: 'BOTTOM LEFT', icon: '↙️' },
       { text: 'BOTTOM RIGHT', icon: '↘️' },
     ];
-    
+
     const ENCOURAGEMENTS = [
       'AMAZING! ⭐',
       'SUPER STAR! 🌟',
@@ -592,6 +651,27 @@ body {
       'INCREDIBLE! 🚀',
       'CHAMPION! 🏆',
       'HERO! 🦸',
+      'SPECTACULAR! 💫',
+      'LEGENDARY! 👑',
+      'UNSTOPPABLE! 🔥',
+      'SUPERB! 🌈',
+      'MAGNIFICENT! ✨',
+      'AWESOME! 💪',
+    ];
+
+    // Different themes for variety on replays
+    const THEMES = [
+      { name: 'Classic', bg: 0x0a0a2e, accent: '#A855F7', light1: 0xff69b4, light2: 0x00ffff },
+      { name: 'Ocean', bg: 0x0a1628, accent: '#38BDF8', light1: 0x00ffff, light2: 0x0088ff },
+      { name: 'Sunset', bg: 0x1a0a1e, accent: '#F97316', light1: 0xff6b6b, light2: 0xffd700 },
+      { name: 'Forest', bg: 0x0a1a0a, accent: '#22C55E', light1: 0x00ff88, light2: 0x88ff00 },
+      { name: 'Candy', bg: 0x1a0a1a, accent: '#EC4899', light1: 0xff69b4, light2: 0xff00ff },
+    ];
+
+    const POWERUPS = [
+      { type: 'double', icon: '2️⃣', text: 'DOUBLE COINS!', duration: 5000 },
+      { type: 'rainbow', icon: '🌈', text: 'RAINBOW MODE!', duration: 5000 },
+      { type: 'star', icon: '⭐', text: 'STAR POWER!', duration: 5000 },
     ];
     
     // ============ GAME STATE ============
@@ -603,6 +683,21 @@ body {
     let lastCoinTime = 0;
     let brushingStreak = 0;
     let prevFrame = null;
+
+    // Audio detection state
+    let audioContext = null;
+    let audioAnalyser = null;
+    let audioDataArray = null;
+    let microphoneStream = null;
+    let isAudioBrushing = false;
+    let audioStreak = 0;
+
+    // Theme and variety state
+    let currentTheme = 0;
+    let activePowerup = null;
+    let powerupEndTime = 0;
+    let coinMultiplier = 1;
+    let gamesPlayed = 0;
     
     // ============ DOM ELEMENTS ============
     const elements = {
@@ -611,6 +706,8 @@ body {
       motionCanvas: document.getElementById('motion-canvas'),
       cameraContainer: document.getElementById('camera-container'),
       brushStatus: document.getElementById('brush-status'),
+      audioIndicator: document.getElementById('audio-indicator'),
+      powerupIndicator: document.getElementById('powerup-indicator'),
       timerText: document.getElementById('timer-text'),
       coinCount: document.getElementById('coin-count'),
       progressFill: document.getElementById('progress-fill'),
@@ -882,7 +979,170 @@ body {
       
       renderer.render(scene, camera);
     }
-    
+
+    // ============ AUDIO SYSTEM (Sound Effects) ============
+    let soundContext = null;
+    let soundGain = null;
+
+    function initSoundSystem() {
+      if (soundContext) return;
+      soundContext = new (window.AudioContext || window.webkitAudioContext)();
+      soundGain = soundContext.createGain();
+      soundGain.gain.value = 0.3;
+      soundGain.connect(soundContext.destination);
+    }
+
+    function playTone(frequency, duration, type = 'sine', volume = 0.3) {
+      if (!soundContext) return;
+      const osc = soundContext.createOscillator();
+      const gain = soundContext.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(frequency, soundContext.currentTime);
+      gain.gain.setValueAtTime(volume, soundContext.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, soundContext.currentTime + duration);
+      osc.connect(gain);
+      gain.connect(soundContext.destination);
+      osc.start();
+      osc.stop(soundContext.currentTime + duration);
+    }
+
+    function playCoinSound() {
+      if (!soundContext) return;
+      // Cheerful ascending arpeggio
+      const notes = [523, 659, 784, 1047]; // C5, E5, G5, C6
+      notes.forEach((freq, i) => {
+        setTimeout(() => playTone(freq, 0.15, 'sine', 0.2), i * 50);
+      });
+    }
+
+    function playPowerupSound() {
+      if (!soundContext) return;
+      // Magical ascending scale with shimmer
+      const notes = [392, 494, 587, 698, 784, 880, 988, 1047];
+      notes.forEach((freq, i) => {
+        setTimeout(() => playTone(freq, 0.2, 'triangle', 0.15), i * 40);
+      });
+    }
+
+    function playCountdownBeep(isGo = false) {
+      if (!soundContext) return;
+      if (isGo) {
+        // "GO!" fanfare
+        playTone(523, 0.1, 'square', 0.2);
+        setTimeout(() => playTone(659, 0.1, 'square', 0.2), 100);
+        setTimeout(() => playTone(784, 0.3, 'square', 0.25), 200);
+      } else {
+        // Regular countdown beep
+        playTone(440, 0.15, 'sine', 0.25);
+      }
+    }
+
+    function playVictoryFanfare() {
+      if (!soundContext) return;
+      // Triumphant fanfare
+      const melody = [
+        { freq: 523, time: 0, dur: 0.15 },
+        { freq: 523, time: 150, dur: 0.15 },
+        { freq: 523, time: 300, dur: 0.15 },
+        { freq: 659, time: 450, dur: 0.4 },
+        { freq: 587, time: 650, dur: 0.15 },
+        { freq: 659, time: 800, dur: 0.15 },
+        { freq: 784, time: 950, dur: 0.5 },
+      ];
+      melody.forEach(note => {
+        setTimeout(() => playTone(note.freq, note.dur, 'triangle', 0.2), note.time);
+      });
+    }
+
+    function playEncouragementSound() {
+      if (!soundContext) return;
+      // Quick happy chime
+      playTone(880, 0.1, 'sine', 0.15);
+      setTimeout(() => playTone(1109, 0.15, 'sine', 0.15), 80);
+    }
+
+    function playWarningSound() {
+      if (!soundContext) return;
+      // Gentle reminder sound
+      playTone(330, 0.2, 'triangle', 0.1);
+    }
+
+    function playQuadrantChangeSound() {
+      if (!soundContext) return;
+      // Soft notification
+      playTone(587, 0.1, 'sine', 0.12);
+      setTimeout(() => playTone(698, 0.15, 'sine', 0.12), 100);
+    }
+
+    // ============ MICROPHONE DETECTION ============
+    async function startMicrophone() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        microphoneStream = stream;
+
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const source = audioContext.createMediaStreamSource(stream);
+
+        audioAnalyser = audioContext.createAnalyser();
+        audioAnalyser.fftSize = 256;
+        audioAnalyser.smoothingTimeConstant = 0.5;
+
+        source.connect(audioAnalyser);
+        audioDataArray = new Uint8Array(audioAnalyser.frequencyBinCount);
+
+        return true;
+      } catch (err) {
+        console.warn('Microphone not available:', err);
+        // Game still works without microphone, just uses camera
+        return false;
+      }
+    }
+
+    function stopMicrophone() {
+      if (microphoneStream) {
+        microphoneStream.getTracks().forEach(track => track.stop());
+        microphoneStream = null;
+      }
+      if (audioContext) {
+        audioContext.close();
+        audioContext = null;
+      }
+    }
+
+    function detectBrushingSound() {
+      if (!audioAnalyser || !audioDataArray) return true; // If no mic, don't block
+
+      audioAnalyser.getByteFrequencyData(audioDataArray);
+
+      // Calculate total energy
+      let totalEnergy = 0;
+      let highFreqEnergy = 0;
+      const midPoint = Math.floor(audioDataArray.length / 2);
+
+      for (let i = 0; i < audioDataArray.length; i++) {
+        totalEnergy += audioDataArray[i];
+        if (i > midPoint) {
+          highFreqEnergy += audioDataArray[i];
+        }
+      }
+
+      const avgEnergy = totalEnergy / audioDataArray.length / 255;
+      const highFreqRatio = totalEnergy > 0 ? (highFreqEnergy / (totalEnergy - highFreqEnergy + 1)) : 0;
+
+      // Brushing sounds are characterized by:
+      // 1. Moderate to high overall volume
+      // 2. High frequency content (the scrubbing sound)
+      const isBrushing = avgEnergy > CONFIG.AUDIO_THRESHOLD && highFreqRatio > CONFIG.AUDIO_HIGH_FREQ_RATIO;
+
+      if (isBrushing) {
+        audioStreak++;
+      } else {
+        audioStreak = Math.max(0, audioStreak - 1);
+      }
+
+      return audioStreak > 3; // Need sustained audio to count
+    }
+
     // ============ CAMERA & MOTION DETECTION ============
     async function startCamera() {
       try {
@@ -962,33 +1222,76 @@ body {
     }
     
     function awardCoin() {
-      coins++;
+      const coinsToAdd = coinMultiplier;
+      coins += coinsToAdd;
       elements.coinCount.textContent = coins;
-      
-      // Create floating coin in DOM
-      const floatingCoin = document.createElement('div');
-      floatingCoin.className = 'floating-coin';
-      floatingCoin.textContent = '🪙';
-      floatingCoin.style.left = (Math.random() * 60 + 20) + '%';
-      floatingCoin.style.bottom = '20%';
-      document.body.appendChild(floatingCoin);
-      
-      setTimeout(() => floatingCoin.remove(), 1500);
-      
-      // Create 3D coin
-      create3DCoin();
-      
+
+      // Play coin sound
+      playCoinSound();
+
+      // Create floating coins in DOM
+      for (let c = 0; c < coinsToAdd; c++) {
+        setTimeout(() => {
+          const floatingCoin = document.createElement('div');
+          floatingCoin.className = 'floating-coin';
+          floatingCoin.textContent = activePowerup === 'rainbow' ? '💎' : '🪙';
+          floatingCoin.style.left = (Math.random() * 60 + 20) + '%';
+          floatingCoin.style.bottom = '20%';
+          if (activePowerup === 'rainbow') {
+            floatingCoin.style.filter = `hue-rotate(${Math.random() * 360}deg)`;
+          }
+          document.body.appendChild(floatingCoin);
+          setTimeout(() => floatingCoin.remove(), 1500);
+        }, c * 100);
+      }
+
+      // Create 3D coin(s)
+      for (let c = 0; c < coinsToAdd; c++) {
+        setTimeout(() => create3DCoin(), c * 100);
+      }
+
       // Show encouragement occasionally
       if (Math.random() > 0.5) {
         showEncouragement();
       }
+
+      // Random power-up chance
+      if (Math.random() < CONFIG.POWERUP_CHANCE && !activePowerup) {
+        triggerPowerup();
+      }
+    }
+
+    function triggerPowerup() {
+      const powerup = POWERUPS[Math.floor(Math.random() * POWERUPS.length)];
+      activePowerup = powerup.type;
+      powerupEndTime = Date.now() + powerup.duration;
+
+      if (powerup.type === 'double') {
+        coinMultiplier = 2;
+      }
+
+      // Show power-up notification
+      elements.encouragement.textContent = powerup.icon + ' ' + powerup.text;
+      elements.encouragement.classList.add('show');
+      playPowerupSound();
+
+      setTimeout(() => {
+        elements.encouragement.classList.remove('show');
+      }, 1500);
+
+      // End power-up after duration
+      setTimeout(() => {
+        activePowerup = null;
+        coinMultiplier = 1;
+      }, powerup.duration);
     }
     
     function showEncouragement() {
       const msg = ENCOURAGEMENTS[Math.floor(Math.random() * ENCOURAGEMENTS.length)];
       elements.encouragement.textContent = msg;
       elements.encouragement.classList.add('show');
-      
+      playEncouragementSound();
+
       setTimeout(() => {
         elements.encouragement.classList.remove('show');
       }, 1500);
@@ -1014,19 +1317,25 @@ body {
       currentQuadrant = (currentQuadrant + 1) % QUADRANTS.length;
       elements.quadrantText.textContent = QUADRANTS[currentQuadrant].text;
       elements.quadrantIcon.textContent = QUADRANTS[currentQuadrant].icon;
+      playQuadrantChangeSound();
     }
     
     function gameComplete() {
       gameState = 'complete';
       stopCamera();
-      
+      stopMicrophone();
+
       elements.finalCoinCount.textContent = coins;
-      
+
       // Calculate stars (1-5 based on coins)
       const starCount = Math.min(5, Math.max(1, Math.ceil(coins / 8)));
       elements.starRating.textContent = '⭐'.repeat(starCount) + '☆'.repeat(5 - starCount);
-      
+
+      // Play victory fanfare
+      playVictoryFanfare();
+
       elements.completeScreen.classList.add('show');
+      gamesPlayed++;
     }
     
     function resetGame() {
@@ -1036,34 +1345,95 @@ body {
       brushingStreak = 0;
       lastCoinTime = 0;
       prevFrame = null;
-      
+      audioStreak = 0;
+      activePowerup = null;
+      coinMultiplier = 1;
+
       elements.coinCount.textContent = '0';
       elements.timerText.classList.remove('urgent');
       elements.quadrantText.textContent = QUADRANTS[0].text;
       elements.quadrantIcon.textContent = QUADRANTS[0].icon;
       updateTimer();
-      
+
       // Clean up 3D coins
       coins3D.forEach(coin => scene.remove(coin));
       coins3D = [];
+
+      // Pick a new random theme for variety
+      applyRandomTheme();
+    }
+
+    function applyRandomTheme() {
+      // Rotate through themes or pick random
+      if (gamesPlayed > 0) {
+        currentTheme = (currentTheme + 1) % THEMES.length;
+      }
+      const theme = THEMES[currentTheme];
+
+      // Apply theme to scene
+      renderer.setClearColor(theme.bg);
+
+      // Update lights
+      scene.children.forEach(child => {
+        if (child.isPointLight) {
+          if (child.position.x > 0) {
+            child.color.setHex(theme.light1);
+          } else {
+            child.color.setHex(theme.light2);
+          }
+        }
+      });
+
+      // Update CSS accent color
+      document.documentElement.style.setProperty('--magic-purple', theme.accent);
     }
     
     // ============ GAME LOOP ============
     let gameLoopId, timerLoopId, quadrantLoopId;
     
     function startGameLoop() {
-      // Motion detection loop (10fps)
+      // Motion and audio detection loop (10fps)
       gameLoopId = setInterval(() => {
         if (gameState !== 'playing') return;
-        
+
         const motionDetected = detectMotion();
-        updateBrushingStatus(motionDetected);
-        
-        // Award coins for sustained brushing
+        const audioDetected = detectBrushingSound();
+
+        // Update audio indicator
+        if (audioDetected) {
+          elements.audioIndicator.classList.add('active');
+          elements.audioIndicator.classList.remove('inactive');
+        } else {
+          elements.audioIndicator.classList.remove('active');
+          elements.audioIndicator.classList.add('inactive');
+        }
+
+        // Update power-up indicator
+        if (activePowerup) {
+          const powerup = POWERUPS.find(p => p.type === activePowerup);
+          if (powerup) {
+            elements.powerupIndicator.textContent = powerup.icon;
+            elements.powerupIndicator.classList.add('show');
+          }
+        } else {
+          elements.powerupIndicator.classList.remove('show');
+        }
+
+        // Require BOTH motion AND audio for brushing to count
+        // This prevents earning coins without actually brushing
+        const isTrulyBrushing = motionDetected && audioDetected;
+        updateBrushingStatus(isTrulyBrushing);
+
+        // Award coins for sustained brushing (both motion AND sound)
         const now = Date.now();
-        if (motionDetected && brushingStreak > 5 && now - lastCoinTime > CONFIG.COIN_INTERVAL) {
+        if (isTrulyBrushing && brushingStreak > 5 && now - lastCoinTime > CONFIG.COIN_INTERVAL) {
           awardCoin();
           lastCoinTime = now;
+        }
+
+        // Play gentle warning if not brushing for a while
+        if (!isTrulyBrushing && brushingStreak === 0 && Math.random() < 0.02) {
+          playWarningSound();
         }
       }, 100);
       
@@ -1095,24 +1465,33 @@ body {
     
     // ============ EVENT HANDLERS ============
     async function handleStart() {
+      // Initialize sound system (needs user interaction to start)
+      initSoundSystem();
+
       const cameraStarted = await startCamera();
       if (!cameraStarted) return;
-      
+
+      // Start microphone for brushing sound detection
+      await startMicrophone();
+
       elements.startScreen.classList.add('hidden');
-      
+
       // Countdown
       gameState = 'countdown';
       elements.countdownOverlay.classList.add('show');
-      
+
       let count = 3;
       elements.countdownNumber.textContent = count;
-      
+      playCountdownBeep(false);
+
       const countdownInterval = setInterval(() => {
         count--;
         if (count > 0) {
           elements.countdownNumber.textContent = count;
+          playCountdownBeep(false);
         } else if (count === 0) {
           elements.countdownNumber.textContent = 'GO!';
+          playCountdownBeep(true);
         } else {
           clearInterval(countdownInterval);
           elements.countdownOverlay.classList.remove('show');
