@@ -524,6 +524,50 @@ body {
   background: rgba(100,100,100,0.7);
 }
 
+/* Sound level meter */
+#sound-meter {
+  position: fixed;
+  bottom: 20px;
+  right: 210px;
+  width: 20px;
+  height: 135px;
+  background: rgba(0,0,0,0.5);
+  border-radius: 10px;
+  border: 3px solid rgba(255,255,255,0.3);
+  overflow: hidden;
+  z-index: 20;
+}
+
+#sound-meter-fill {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 0%;
+  background: linear-gradient(to top, var(--success-green), #22C55E, #FFD700, #F97316, #EF4444);
+  transition: height 0.1s ease;
+  border-radius: 0 0 7px 7px;
+}
+
+#sound-meter-threshold {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: white;
+  z-index: 1;
+}
+
+#sound-meter-label {
+  position: absolute;
+  bottom: -25px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 12px;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+
 /* Power-up indicator */
 #powerup-indicator {
   position: fixed;
@@ -594,6 +638,11 @@ body, #canvas-container {
 
   <div id="powerup-indicator"></div>
 
+  <div id="sound-meter">
+    <div id="sound-meter-fill"></div>
+    <div id="sound-meter-threshold"></div>
+  </div>
+
   <div id="start-screen">
     <div id="start-tooth">🦷</div>
     <h1 id="start-title">TOOTHBRUSH HERO!</h1>
@@ -628,7 +677,7 @@ body, #canvas-container {
       COIN_INTERVAL: 2500, // ms
       QUADRANT_INTERVAL: 30000, // ms
       // Audio detection settings
-      AUDIO_THRESHOLD: 0.12, // Minimum audio level to count as brushing
+      AUDIO_THRESHOLD: 0.15, // Minimum audio level to count as brushing
       // Power-up settings
       POWERUP_CHANCE: 0.15, // Chance of power-up appearing
       POWERUP_DURATION: 5000, // ms
@@ -707,6 +756,9 @@ body, #canvas-container {
       brushStatus: document.getElementById('brush-status'),
       audioIndicator: document.getElementById('audio-indicator'),
       powerupIndicator: document.getElementById('powerup-indicator'),
+      soundMeter: document.getElementById('sound-meter'),
+      soundMeterFill: document.getElementById('sound-meter-fill'),
+      soundMeterThreshold: document.getElementById('sound-meter-threshold'),
       timerText: document.getElementById('timer-text'),
       coinCount: document.getElementById('coin-count'),
       progressFill: document.getElementById('progress-fill'),
@@ -1119,6 +1171,14 @@ body, #canvas-container {
         totalEnergy += audioDataArray[i];
       }
       const avgEnergy = totalEnergy / audioDataArray.length / 255;
+
+      // Update sound meter visual (cap at 100%)
+      const meterLevel = Math.min(100, avgEnergy * 200);
+      elements.soundMeterFill.style.height = meterLevel + '%';
+
+      // Position threshold line (threshold is 0-1, convert to percentage)
+      const thresholdPos = CONFIG.AUDIO_THRESHOLD * 200;
+      elements.soundMeterThreshold.style.bottom = thresholdPos + '%';
 
       // Simple volume-based detection - brushing creates sustained sound
       const isBrushing = avgEnergy > CONFIG.AUDIO_THRESHOLD;
